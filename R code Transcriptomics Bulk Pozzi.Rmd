@@ -1,0 +1,465 @@
+---
+title: "Transcriptomics Exam: Bulk Analysis"
+author: "Camilla Pozzi"
+date: '2022-07-12'
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+#Bulk analysis
+
+Loading the library needed for the analysis
+```{r, results="hide"}
+library(recount3)
+library(edgeR)
+library(ggplot2)
+```
+
+
+## Loading the data
+```{r, results="hide"}
+rse_brain <- readRDS('rse_brain.RDS')
+rse_liver <- readRDS('rse_liver.RDS')
+rse_lung <- readRDS('rse_lung.RDS')
+```
+
+We will perform the bulk analysis in 3 different tissue to extract differentially expressed genes. The tissue used are: Brain, Liver and Lung.
+
+First of all we will perform the analysis using the raw count table, so without filtering out the rRNA, mRNA, pseudo-genes and non canonical chromosomes. 
+We will then perform a clean analysis filter out the sources of variability. 
+
+We want to investigate if the methods are able to find meaningful differentially expressed between the three conditions. 
+
+First of all we need to get the counts for each gene form the coverage
+```{r}
+assays(rse_brain)$counts <- transform_counts(rse_brain)
+assays(rse_liver)$counts <- transform_counts(rse_liver)
+assays(rse_lung)$counts <- transform_counts(rse_lung)
+```
+
+Then we can pick the replicates according to some thresholds:
+- RIN >= 6 (it would be preferable to have a RIN higher than 7)
+- fraction of rRNA reads < 0.1 
+- % uniquely mapped reads > 85%
+
+Brain:
+```{r}
+for (id in c(85, 86, 87)){
+  cat('Sample n°', id, '\n')
+  cat('RIN:', colData(rse_brain)$gtex.smrin[id], '\n')
+  cat('rRNA:', colData(rse_brain)$gtex.smrrnart[id], '\n')
+  cat('Mapping:', colData(rse_brain)$"recount_qc.star.uniquely_mapped_reads_%_both"[id], '\n\n')}
+```
+Liver:
+```{r}
+for (id in c(85, 87, 91)){
+  cat('Sample n°', id, '\n')
+  cat('RIN:', colData(rse_liver)$gtex.smrin[id], '\n')
+  cat('rRNA:', colData(rse_liver)$gtex.smrrnart[id], '\n')
+  cat('Mapping:', colData(rse_liver)$"recount_qc.star.uniquely_mapped_reads_%_both"[id], '\n\n')}
+```
+We exluded the replicates 86, and 88 to 91 due to a low RIN.
+
+Lung:
+```{r}
+for (id in c(86, 87, 88)){
+  cat('Sample n°', id, '\n')
+  cat('RIN:', colData(rse_lung)$gtex.smrin[id], '\n')
+  cat('rRNA:', colData(rse_lung)$gtex.smrrnart[id], '\n')
+  cat('Mapping:', colData(rse_lung)$"recount_qc.star.uniquely_mapped_reads_%_both"[id], '\n\n')}
+```
+
+## Selecting the replicates for each tissue
+```{r}
+rse_brain_selected <- rse_brain[, c(85, 86, 87)]
+rse_liver_selected <- rse_liver[, c(85, 87, 91)]
+rse_lung_selected <- rse_lung[, c(86, 87, 88)]
+```
+
+Now we can extract the counts for each of the replicate
+```{r}
+counts_brain_selected <- assays(rse_brain_selected)$counts
+counts_liver_selected <- assays(rse_liver_selected)$counts
+counts_lung_selected <- assays(rse_lung_selected)$counts
+```
+
+## Count Table
+We can build the count table and assign the official gene name.
+```{r}
+count.table <- cbind(counts_brain_selected, counts_liver_selected, counts_lung_selected) 
+
+colnames(count.table) <- c('Brain.85', 'Brain.86', 'Brain.87', 'Liver.85', 'Liver.87', 'Liver.91', 'Lung.86', 'Lung.87', 'Lung.88')
+
+rownames(count.table) <- rowData(rse_brain_selected)$gene_name 
+
+y <- DGEList(counts =  count.table)
+```
+
+We can also define how replicates are grouped and add this information to the result object (y): 
+```{r}
+group <- as.factor(c('Brain', 'Brain', 'Brain', 'Liver', 'Liver', 'Liver', 'Lung', 'Lung', 'Lung'))
+
+y$samples$group <- group
+```
+
+'Quality' information can be added to the result object for each sample: 
+```{r}
+# RIN 
+y$samples$rin <- as.factor(c(
+  colData(rse_brain_selected)$gtex.smrin, 
+  colData(rse_liver_selected)$gtex.smrin, 
+  colData(rse_lung_selected)$gtex.smrin))
+
+# rRNA
+y$samples$rRNA <- as.factor(c(
+  colData(rse_brain_selected)$gtex.smrrnart, 
+  colData(rse_liver_selected)$gtex.smrrnart, 
+  colData(rse_lung_selected)$gtex.smrrnart))
+
+# UNIQUELY MAPPED READS
+y$samples$mapped <- as.factor(c(
+  colData(rse_brain_selected)$'recount_qc.star.uniquely_mapped_reads_%_both',
+  colData(rse_liver_selected)$'recount_qc.star.uniquely_mapped_reads_%_both', 
+  colData(rse_lung_selected)$'recount_qc.star.uniquely_mapped_reads_%_both'))
+
+# CHR % of reads mapping on the mitochondrial chromosome
+y$samples$chrM <- as.factor(c(
+  colData(rse_brain_selected)$'recount_qc.aligned_reads%.chrm',
+  colData(rse_liver_selected)$'recount_qc.aligned_reads%.chrm', 
+  colData(rse_lung_selected)$'recount_qc.aligned_reads%.chrm'))
+
+# SLICE 
+y$samples$slice <- as.factor(c(
+  colData(rse_brain_selected)$gtex.smtsd, 
+  colData(rse_liver_selected)$gtex.smtsd, 
+  colData(rse_lung_selected)$gtex.smtsd))
+
+# SEX 
+y$samples$sex <- as.factor(c(
+  colData(rse_brain_selected)$gtex.sex, 
+  colData(rse_liver_selected)$gtex.sex, 
+  colData(rse_lung_selected)$gtex.sex))
+
+# AGE
+y$samples$age <- as.factor(c(
+  colData(rse_brain_selected)$gtex.age, 
+  colData(rse_liver_selected)$gtex.age, 
+  colData(rse_lung_selected)$gtex.age))
+```
+
+We can look at how many genes have 0 counts
+```{r}
+table(rowSums(y$counts == 0) == 9)
+```
+## Filtering by expression
+
+```{r}
+keep.expressed <- filterByExpr(y, group = group)
+y <- y [keep.expressed, , keep.lib.sizes = F]
+```
+
+## logCPM
+Transforming counts in Counts Per Million in a Logarithmic scale (logCPM)
+```{r}
+logcpm_before <- cpm(y, log = T)
+y <- calcNormFactors(y, method = 'TMM')
+head(y)
+
+logcpm <- cpm(y, log = T)
+logcpm_after <- logcpm
+```
+We can visualize the normalization applied to the logCPM using box-plots.
+
+Graph of logCPM before normalization
+```{r, results = 'hide'}
+library(tidyr)
+library(dplyr)
+```
+
+```{r}
+brain <- c('Brain.85', 'Brain.86', 'Brain.87')
+liver <- c('Liver.85', 'Liver.87', 'Liver.91')
+lung <- c('Lung.86', 'Lung.87', 'Lung.88')
+
+logcpm_before_long <- data.frame(logcpm_before)
+#pivot the data frame into a long format
+logcpm_before_long$GeneID <- rownames(logcpm_before_long)
+names <- colnames(logcpm_before_long)[1: length(colnames(logcpm_before_long)) - 1]
+
+logcpm_before_long  <- logcpm_before_long  %>% pivot_longer(cols= names ,
+                    names_to= 'Samples',
+                    values_to='counts')
+logcpm_before_long$Legend <- ifelse(logcpm_before_long$Samples %in% brain, 'Brain', ifelse(logcpm_before_long$Samples %in% liver, 'Liver', 'Colon'))
+logcpm_before_long $Samples <- as.factor(logcpm_before_long $Samples)
+
+ggplot(logcpm_before_long , aes(x= Samples, y= counts, fill = Legend)) +
+  geom_boxplot(width = 0.7) + theme_minimal() +
+  labs(title="Counts before normalization", x = 'Tissues', y = "logCPM") +
+  scale_fill_brewer(palette = 'PuBuGn' )
+```
+
+Graph of logCPM after Normalization
+```{r}
+logcpm_after_long <- data.frame(logcpm_after)
+#pivot the data frame into a long format
+logcpm_after_long$GeneID <- rownames(logcpm_after_long)
+names <- colnames(logcpm_after_long)[1: length(colnames(logcpm_after_long)) - 1]
+
+logcpm_after_long  <- logcpm_after_long  %>% pivot_longer(cols= names ,
+                    names_to= 'Samples',
+                    values_to='counts')
+logcpm_after_long$Legend <- ifelse(logcpm_after_long$Samples %in% brain, 'Brain', ifelse(logcpm_after_long$Samples %in% liver, 'Liver', 'Colon'))
+logcpm_after_long $Samples <- as.factor(logcpm_after_long $Samples)
+
+ggplot(logcpm_after_long , aes(x= Samples, y= counts, fill = Legend)) +
+  geom_boxplot(width = 0.7) +  theme_minimal() +
+  labs(title="Counts after normalization", x = 'Tissues', y = "logCPM") +
+  scale_fill_brewer(palette = 'PuBuGn')
+```
+```{r}
+nf <- calcNormFactors(y, method = "TMM") #to find the normalization factors
+nf
+```
+
+## Analysis for differentially expressed genes
+We do not want to set an intercept since there is no base condition to which each sample can be compared to. 
+```{r}
+design <- model.matrix(~ 0 + group, data = y$samples)
+colnames(design) <- levels(y$samples$group)
+```
+
+Multi-Dimensional Scaling plot (MDS)
+Using a MDS we can visualize our data in a 2 dimensional plot. The 2 dimension are the the Leading logFC dimension. And MDS plot uses the top 500 genes and compare their logFC to find similarities between the samples. If the samples cluster together than we can assume they represent a similar condition. 
+
+```{r}
+plotMDS(logcpm, labels = colnames(logcpm), main = 'Multidimensional scaling (MDS) plot',
+col=c(rep("thistle3",3),rep("turquoise4",3),rep("slategray3",3)))
+```
+
+Mitchocondrial RNA
+```{r}
+
+plotMDS(logcpm, labels = y$samples$chrM, main = 'Multidimensional scaling (MDS) plot', col=c(rep("thistle3",3),rep("turquoise4",3),rep("slategray3",3)))
+```
+
+## Biological Coefficient of Variation (BCV) plot
+This plot let us visualize the square root of dispersion (BCV) with respect to the average logCPM. 
+```{r}
+y <- estimateDisp(y, design)
+plotBCV(y, main = 'Biological Coefficient of Variation (BCV) plot')
+```
+## Differentially Expressed Genes
+```{r}
+fit <- glmQLFit(y, design)
+
+# The order of the group is Brain, Lung, Liver.  
+
+# Liver vs Brain
+qlfLB <- glmQLFTest(fit, contrast = c(-1, 1, 0))
+
+# Lung vs Brain
+qlfUB<- glmQLFTest(fit, contrast = c(-1, 0, 1))
+
+# Liver vs Lung
+qlfLU <- glmQLFTest(fit, contrast = c(0, -1, 1))
+```
+
+Extracting the full table of DE genes sorted by adjusted p-values
+```{r}
+results.UB <- topTags(qlfUB, n = 1000000, adjust.method = 'BH', sort.by = 'PValue', p.value = 1)
+results.LB <- topTags(qlfLB, n = 1000000, adjust.method = 'BH', sort.by = 'PValue', p.value = 1)
+results.LU <- topTags(qlfLU, n = 1000000, adjust.method = 'BH', sort.by = 'PValue', p.value = 1)
+```
+
+Saving the results in an excel file
+```{r, results = 'hide'}
+library(writexl)
+write_xlsx(data.frame(results.UB), 'resultsUB.xlsx')
+write_xlsx(data.frame(results.LB), 'resultsLB.xlsx')
+write_xlsx(data.frame(results.LU), 'resultsLU.xlsx')
+```
+
+Quick summary for genes UP, DOWN and Not differentially expressed for each comparison: 
+• Liver vs Brain
+```{r}
+#summary(decideTests(qlfLB, p.value = 0.05, lcf = 0))
+summary(decideTests(qlfLB, p.value = 0.01, lcf = 1)) # different adjusted p.value and FC
+```
+
+• Lung vs Brain
+```{r}
+#summary(decideTests(qlfUB,  p.value = 0.05, lcf = 0))
+summary(decideTests(qlfUB,  p.value = 0.01, lcf = 1)) # different adjusted p.value and FC
+```
+
+• Liver vs Lung
+```{r}
+#summary(decideTests(qlfLC,  p.value = 0.05, lcf = 0))
+summary(decideTests(qlfLU,  p.value = 0.01, lcf = 1)) # different adjusted p.value and FC
+```
+
+## Genes up regulated in one condition vs both conditions
+### Brain
+```{r}
+#Select the genes differentially expressed in one tissue against the other two
+#Brain
+brain_brainvsliver <- rownames(as.data.frame(results.LB)[as.data.frame(results.LB)$logFC < -1 & as.data.frame(results.LB)$FDR < 0.01 & as.data.frame(results.LB)$logCPM > 0 ,]) 
+
+brain_brainvslung <- rownames(as.data.frame(results.UB)[as.data.frame(results.UB)$logFC < -1 & as.data.frame(results.UB)$FDR < 0.01 & as.data.frame(results.UB)$logCPM > 0 ,]) 
+
+brain_vs_livervslung <- intersect(brain_brainvsliver, brain_brainvslung) 
+
+# We can then trim the obtained list to remove genes that start with LOC, LINC, MIR, RPL and SNOR 
+
+starts = c('LOC', 'LINC', 'MIR', 'SNOR', 'RPL') 
+
+for(s in starts) { 
+  brain_vs_livervslung <- brain_vs_livervslung[which(!startsWith(brain_vs_livervslung, s))] 
+}
+```
+### Liver
+```{r}
+liver_livervsbrain <- rownames(as.data.frame(results.LB)[as.data.frame(results.LB)$logFC > 1 & as.data.frame(results.LB)$FDR < 0.01 & as.data.frame(results.LB)$logCPM > 0 ,]) 
+
+liver_livervslung <- rownames(as.data.frame(results.LU)[as.data.frame(results.LU)$logFC < -1 & as.data.frame(results.LU)$FDR < 0.01 & as.data.frame(results.LU)$logCPM > 0 ,]) 
+
+liver_vs_brainvslung <- intersect(liver_livervsbrain, liver_livervslung)
+
+# We can then trim the obtained list to remove genes that start with LOC, LINC, MIR, RPL and SNOR 
+
+starts = c('LOC', 'LINC', 'MIR', 'SNOR', 'RPL') 
+
+for(s in starts) { 
+  liver_vs_brainvslung <- liver_vs_brainvslung[which(!startsWith(liver_vs_brainvslung, s))] 
+} 
+```
+### Lung
+```{r}
+lung_brainvslung <- rownames(as.data.frame(results.UB)[as.data.frame(results.UB)$logFC > 1 & as.data.frame(results.UB)$FDR < 0.01 & as.data.frame(results.UB)$logCPM > 0 ,]) 
+
+lung_livervslung <- rownames(as.data.frame(results.LU)[as.data.frame(results.LU)$logFC > 1 & as.data.frame(results.LU)$FDR < 0.01 & as.data.frame(results.LU)$logCPM > 0 ,]) 
+
+lung_vs_brainvsliver <- intersect(lung_brainvslung, lung_livervslung)
+
+# We can then trim the obtained list to remove genes that start with LOC, LINC, MIR, RPL and SNOR 
+
+starts = c('LOC', 'LINC', 'MIR', 'SNOR', 'RPL') 
+
+for(s in starts) { 
+  lung_vs_brainvsliver <- lung_vs_brainvsliver[which(!startsWith(lung_vs_brainvsliver, s))] 
+} 
+```
+
+```{r}
+write_xlsx(data.frame(brain_vs_livervslung), 'topgenes_brain.xlsx')
+write_xlsx(data.frame(liver_vs_brainvslung), 'topgenes_liver.xlsx')
+write_xlsx(data.frame(lung_vs_brainvsliver), 'topgenes_lung.xlsx')
+```
+
+
+## “Functional” Enrichment Analysis 
+We used ENRICHER to perform Functional enrichment analysis
+
+Here you can find the page of ENRICHER: 
+
+[Brain_full](https://maayanlab.cloud/Enrichr/enrich?dataset=dc68877c5a3978b1ecd2e1f14f55b415).
+[Liver_full](https://maayanlab.cloud/Enrichr/enrich?dataset=a701c1714c90c2fc853a80f38b61deca).
+[Lung_full](https://maayanlab.cloud/Enrichr/enrich?dataset=2ef69c01708bf94495012c7b1547f84c).
+
+## Wide analysis of a single gene
+```{r}
+assays(rse_brain)$TPM <- recount::getTPM(rse_brain)
+assays(rse_liver)$TPM <- recount::getTPM(rse_liver)
+assays(rse_lung)$TPM <- recount::getTPM(rse_lung)
+```
+
+Now, find the most appropriate statistical test, and prove that the difference of expression for the gene is still significant if we consider all the samples, instead of just three per tissue.
+
+Man Withney U test 
+```{r, results= 'hide'}
+library(dbplyr)
+library(ggpubr)
+library(rstatix)
+```
+
+```{r}
+id_REEP2  <- which(rowData(rse_brain)$gene_name ==  'REEP2')
+df_brain <- data.frame(TPM = assays(rse_brain)$TPM[id_REEP2,],group="Brain") 
+df_lung <- data.frame(TPM = assays(rse_lung)$TPM[id_REEP2,],group="Lung") 
+df_liver <- data.frame(TPM = assays(rse_liver)$TPM[id_REEP2,],group="Liver") 
+data_RNASE4 <- rbind(df_brain, df_lung, df_liver) 
+
+res_kruskal <- data_RNASE4 %>% kruskal_test(TPM ~ group) 
+res_kruskal 
+
+pwc2 <- data_RNASE4 %>% wilcox_test(TPM ~ group, p.adjust.method = "BH") 
+pwc2 
+
+pwc <- pwc2 %>% add_xy_position(x = "group") #Auto-compute p-value label positions 
+ggboxplot(data_RNASE4, x = "group", y = "TPM",outlier.shape = NA,width = 0.5,title= "REEP2 expression across organs", fill = 'thistle2') + 
+stat_pvalue_manual(pwc,y.position = c(700,700,700)) + #Add the p-values to the plot 
+labs(subtitle = get_test_label(res_kruskal, detailed = TRUE),caption = get_pwc_label(pwc)) #test information (top:Kruskal, bottom:pairwise comparison)
+```
+
+```{r}
+id_SCEL  <- which(rowData(rse_brain)$gene_name ==  'SCEL')
+df_brain <- data.frame(TPM = assays(rse_brain)$TPM[id_SCEL,],group="Brain") 
+df_lung <- data.frame(TPM = assays(rse_lung)$TPM[id_SCEL,],group="Lung") 
+df_liver <- data.frame(TPM = assays(rse_liver)$TPM[id_SCEL,],group="Liver") 
+data_RNASE4 <- rbind(df_brain, df_lung, df_liver) 
+
+res_kruskal <- data_RNASE4 %>% kruskal_test(TPM ~ group) 
+res_kruskal 
+
+pwc2 <- data_RNASE4 %>% wilcox_test(TPM ~ group, p.adjust.method = "BH") 
+pwc2 
+
+pwc <- pwc2 %>% add_xy_position(x = "group") #Auto-compute p-value label positions 
+ggboxplot(data_RNASE4, x = "group", y = "TPM",outlier.shape = NA,width = 0.5,title="SCEL expression across organs", fill = 'slategray2') + 
+stat_pvalue_manual(pwc,y.position = c(300,300,300)) + #Add the p-values to the plot 
+labs(subtitle = get_test_label(res_kruskal, detailed = TRUE),caption = get_pwc_label(pwc)) #test information (top:Kruskal, bottom:pairwise comparison)
+```
+
+```{r}
+id_ALB  <- which(rowData(rse_brain)$gene_name ==  'ALB')
+df_brain <- data.frame(TPM = assays(rse_brain)$TPM[id_ALB,],group="Brain") 
+df_colon <- data.frame(TPM = assays(rse_lung)$TPM[id_ALB,],group="Lung") 
+df_liver <- data.frame(TPM = assays(rse_liver)$TPM[id_ALB,],group="Liver") 
+data_RNASE4 <- rbind(df_brain, df_lung, df_liver) 
+
+res_kruskal <- data_RNASE4 %>% kruskal_test(TPM ~ group) 
+res_kruskal 
+
+pwc2 <- data_RNASE4 %>% wilcox_test(TPM ~ group, p.adjust.method = "BH") 
+pwc2 
+
+pwc <- pwc2 %>% add_xy_position(x = "group") #Auto-compute p-value label positions 
+ggboxplot(data_RNASE4, x = "group", y = "TPM",outlier.shape = NA,width = 0.5,title="ALB expression across organs", fill = 'turquoise4') + 
+stat_pvalue_manual(pwc,y.position = c(130000, 130000, 130000)) + #Add the p-values to the plot 
+labs(subtitle = get_test_label(res_kruskal, detailed = TRUE),caption = get_pwc_label(pwc)) #test information (top:Kruskal, bottom:pairwise comparison)
+```
+
+```{r}
+id_GPX2 <- which(rowData(rse_brain)$gene_name ==  'GPX2')
+df_brain <- data.frame(TPM = assays(rse_brain)$TPM[id_GPX2,],group="Brain") 
+df_lung <- data.frame(TPM = assays(rse_lung)$TPM[id_GPX2,],group="Lung") 
+df_liver <- data.frame(TPM = assays(rse_liver)$TPM[id_GPX2,],group="Liver") 
+data_RNASE4 <- rbind(df_brain, df_lung, df_liver) 
+
+res_kruskal <- data_RNASE4 %>% kruskal_test(TPM ~ group) 
+res_kruskal 
+
+pwc2 <- data_RNASE4 %>% wilcox_test(TPM ~ group, p.adjust.method = "BH") 
+pwc2 
+
+pwc <- pwc2 %>% add_xy_position(x = "group") #Auto-compute p-value label positions 
+ggboxplot(data_RNASE4, x = "group", y = "TPM",outlier.shape = NA,width = 0.5,title="GPX2 expression across organs", fill = 'turquoise4') + 
+stat_pvalue_manual(pwc,y.position = c(1500, 1500, 1500)) + #Add the p-values to the plot 
+labs(subtitle = get_test_label(res_kruskal, detailed = TRUE),caption = get_pwc_label(pwc)) #test information (top:Kruskal, bottom:pairwise comparison)
+```
+
+
+
